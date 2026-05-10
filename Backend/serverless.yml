@@ -1,0 +1,195 @@
+service: car-rental-backend
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: us-east-1 # Change this to your preferred AWS region
+  environment:
+    VEHICLES_TABLE: ${self:custom.vehiclesTableName}
+    TASKS_TABLE: ${self:custom.tasksTableName}
+    BOOKINGS_TABLE: ${self:custom.bookingsTableName}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+          Resource:
+            - "Fn::GetAtt": [VehiclesTable, Arn]
+            - "Fn::GetAtt": [TasksTable, Arn]
+            - "Fn::Join": [ "/", [ "Fn::GetAtt": [TasksTable, Arn], "index", "DateIndex" ] ]
+            - "Fn::GetAtt": [BookingsTable, Arn]
+            - "Fn::Join": [ "/", [ "Fn::GetAtt": [BookingsTable, Arn], "index", "StartDateIndex" ] ]
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+          Resource:
+            - "Fn::Join": ["", ["arn:aws:s3:::", {"Ref": "VehicleImagesBucket"}, "/*"]]
+
+custom:
+  vehiclesTableName: 'vehicles-table-${sls:stage}'
+  tasksTableName: 'tasks-table-${sls:stage}'
+  bookingsTableName: 'bookings-table-${sls:stage}'
+
+functions:
+  api:
+    handler: index.handler
+    events:
+      - httpApi: '*'
+
+resources:
+  Resources:
+    # -----------------------------
+    # DynamoDB Tables
+    # -----------------------------
+    VehiclesTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.vehiclesTableName}
+        AttributeDefinitions:
+          - AttributeName: reg_number
+            AttributeType: S
+        KeySchema:
+          - AttributeName: reg_number
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+
+    TasksTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.tasksTableName}
+        AttributeDefinitions:
+          - AttributeName: task_id
+            AttributeType: S
+          - AttributeName: reg_number
+            AttributeType: S
+          - AttributeName: date
+            AttributeType: S
+        KeySchema:
+          - AttributeName: task_id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: DateIndex
+            KeySchema:
+              - AttributeName: reg_number
+                KeyType: HASH
+              - AttributeName: date
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+        BillingMode: PAY_PER_REQUEST
+
+    BookingsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.bookingsTableName}
+        AttributeDefinitions:
+          - AttributeName: book_number
+            AttributeType: S
+          - AttributeName: reg_number
+            AttributeType: S
+          - AttributeName: start_date
+            AttributeType: S
+        KeySchema:
+          - AttributeName: book_number
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: StartDateIndex
+            KeySchema:
+              - AttributeName: reg_number
+                KeyType: HASH
+              - AttributeName: start_date
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+        BillingMode: PAY_PER_REQUEST
+
+    # -----------------------------
+    # S3 Bucket for Vehicle Images
+    # -----------------------------
+    VehicleImagesBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: car-rental-vehicle-images-${sls:stage}-${aws:accountId}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: false
+          IgnorePublicAcls: false
+          BlockPublicPolicy: false
+          RestrictPublicBuckets: false
+        OwnershipControls:
+          Rules:
+            - ObjectOwnership: BucketOwnerPreferred
+
+    VehicleImagesBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref VehicleImagesBucket
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action: s3:GetObject
+              Resource: !Join ["", ["arn:aws:s3:::", !Ref VehicleImagesBucket, "/*"]]
+
+    # -----------------------------
+    # Cognito User Pool & Clients
+    # -----------------------------
+    CognitoUserPool:
+      Type: AWS::Cognito::UserPool
+      Properties:
+        UserPoolName: car-rental-users-${sls:stage}
+        UsernameAttributes:
+          - email
+        AutoVerifiedAttributes:
+          - email
+        Policies:
+          PasswordPolicy:
+            MinimumLength: 8
+            RequireLowercase: true
+            RequireNumbers: true
+            RequireSymbols: false
+            RequireUppercase: true
+
+    CognitoUserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: car-rental-web-client-${sls:stage}
+        UserPoolId: !Ref CognitoUserPool
+        ExplicitAuthFlows:
+          - ALLOW_USER_SRP_AUTH
+          - ALLOW_REFRESH_TOKEN_AUTH
+        PreventUserExistenceErrors: ENABLED
+
+    # -----------------------------
+    # Cognito User Groups
+    # -----------------------------
+    AdminGroup:
+      Type: AWS::Cognito::UserPoolGroup
+      Properties:
+        GroupName: Admins
+        Description: "Administrator group with full access"
+        Precedence: 1
+        UserPoolId: !Ref CognitoUserPool
+
+    DataEnterGroup:
+      Type: AWS::Cognito::UserPoolGroup
+      Properties:
+        GroupName: DataEnter
+        Description: "Data Entry group with limited access"
+        Precedence: 2
+        UserPoolId: !Ref CognitoUserPool
+
+  Outputs:
+    UserPoolId:
+      Value: !Ref CognitoUserPool
+    UserPoolClientId:
+      Value: !Ref CognitoUserPoolClient
+    S3BucketName:
+      Value: !Ref VehicleImagesBucket
